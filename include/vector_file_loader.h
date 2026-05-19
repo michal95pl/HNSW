@@ -9,7 +9,8 @@
 #include <vector>
 #include <cstdint>
 #include <fstream>
-#include <aligned_utils.h>
+
+#include "aligned_utils.h"
 
 class VectorFileLoader {
     uint32_t numVectors{};

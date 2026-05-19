@@ -9,7 +9,6 @@
 #include <string>
 #include <HNSW.h>
 #include <ground_truth_file_handler.h>
-#include <aligned_utils.h>
 
 class HNSW_benchmark {
 
@@ -26,7 +25,7 @@ public:
 
     void loadVectorsToHNSW();
     void computeDistancesForQueryFile(const std::string &queryFile, uint16_t kNearestVectors) const;
-    float getRecall(const std::string &groundTruthFilePath, const std::string &queryFilePath);
+    [[nodiscard]] float getRecall(const std::string &groundTruthFilePath, const std::string &queryFilePath) const;
 };
 
 

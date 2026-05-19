@@ -13,7 +13,6 @@
 void HNSW_benchmark::loadVectorsToHNSW() {
     uint64_t fileNum = 0;
     std::vector<AlignedVector> batch(batchSize);
-
     for (auto &file : files) {
         VectorFileLoader loader(file);
         ProgressBar progressBar(loader.getCount(), 50, "Add vectors to database");
@@ -21,7 +20,7 @@ void HNSW_benchmark::loadVectorsToHNSW() {
         while (loader.readNextVectorBatch(batch, batchSize)) {
             for (auto &vec : batch) {
                 const uint64_t external_id = (fileNum << 32) | (vecNum & 0xFFFFFFFF);
-                hnsw.addPoint(external_id, std::move(vec), 30, 60);
+                hnsw.addPoint(external_id, vec.data(), 200);
                 vecNum++;
             }
             progressBar.update(vecNum);
@@ -30,7 +29,7 @@ void HNSW_benchmark::loadVectorsToHNSW() {
     }
 }
 
-float HNSW_benchmark::getRecall(const std::string &groundTruthFilePath, const std::string &queryFilePath) {
+float HNSW_benchmark::getRecall(const std::string &groundTruthFilePath, const std::string &queryFilePath) const {
     GroundTruthFileHandler gtHandler(groundTruthFilePath);
     std::vector<GroundTruthDistance> gtDistances = gtHandler.getAllVectors();
 
@@ -49,7 +48,7 @@ float HNSW_benchmark::getRecall(const std::string &groundTruthFilePath, const st
 
     uint32_t counter = 0;
     for (uint32_t query_id = 0; query_id < query_vectors.size(); ++query_id) {
-        uint64_t hnswResult = hnsw.search(std::move(query_vectors[query_id]), 60, 1)[0];
+        uint64_t hnswResult = hnsw.search(query_vectors[query_id].data(), 64, 1)[0];
         uint64_t truthResult = gtDistances[query_id * gtHandler.getK()].id;
         if (hnswResult == truthResult) {
             counter++;
@@ -64,14 +63,14 @@ float HNSW_benchmark::getRecall(const std::string &groundTruthFilePath, const st
 }
 
 void HNSW_benchmark::getKNearestVectors(const uint32_t fileId, std::vector<AlignedVector> &vectors, const AlignedVector &queryVector,
-    std::vector<GroundTruthDistance> &K_Distances, const uint16_t k) {
+    std::vector<GroundTruthDistance> &K_Distances, uint16_t k) {
 
     std::priority_queue<GroundTruthDistance> maxHeap;
     K_Distances.clear();
     uint32_t vectorId = 0;
 
     for (auto &vector : vectors) {
-        const float distance = HNSW::calculateDistance(vector, queryVector);
+        const float distance = HNSW::calculateDistanceAVX512(vector.data(), queryVector.data());
         const uint64_t external_id = (static_cast<uint64_t>(fileId) << 32) | (vectorId & 0xFFFFFFFF);
         if (maxHeap.size() < k) {
             maxHeap.push(GroundTruthDistance(external_id, distance));
@@ -110,7 +109,7 @@ void HNSW_benchmark::computeDistancesForQueryFile(const std::string &queryFile, 
     queryLoader.readNextVectorBatch(query_vectors, queryLoader.getCount());
 
     for (auto &vector : query_vectors) {
-        HNSW::normalizeVector(vector);
+        HNSW::normalizeVectorAVX512(vector.data());
     }
 
     GroundTruthFileHandler gtHandler("../data/ground_truth.bin");
@@ -129,7 +128,7 @@ void HNSW_benchmark::computeDistancesForQueryFile(const std::string &queryFile, 
 
         #pragma omp parallel for schedule(dynamic)
         for (auto &vector : file_vectors) {
-            HNSW::normalizeVector(vector);
+            HNSW::normalizeVectorAVX512(vector.data());
         }
 
         #pragma omp parallel for schedule(dynamic)

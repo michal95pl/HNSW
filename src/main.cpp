@@ -1,10 +1,6 @@
-#include <algorithm>
 #include <iostream>
 #include <vector>
 #include <random>
-
-#include <vector_file_loader.h>
-#include <HNSW.h>
 #include <HNSW_benchmark.h>
 
 int main() {

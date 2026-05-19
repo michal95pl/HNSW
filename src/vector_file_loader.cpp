@@ -6,6 +6,8 @@
 #include <fstream>
 #include <iostream>
 
+#include "aligned_utils.h"
+
 VectorFileLoader::VectorFileLoader(const std::string& path) : file(path, std::ios::binary) {
     if (!(file.is_open() && loadHeader())) {
         std::cout << "Failed to open file" << std::endl;
@@ -42,7 +44,6 @@ bool VectorFileLoader::readNextVector(AlignedVector& outVec) {
     return true;
 }
 
-//todo: make 1d vector and make inline function
 bool VectorFileLoader::readNextVectorBatch(std::vector<AlignedVector>& outBatch, const uint32_t batchSize) {
     if (!file.is_open() || file.eof()) return false;
 

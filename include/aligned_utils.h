@@ -8,43 +8,60 @@
 #include <new>
 #include <bit>
 #include <cstdlib>
+#include <memory>
 #include <vector>
 
 template <typename T, std::size_t Alignment>
     requires (Alignment >= alignof(T)) && (std::has_single_bit(Alignment))
     struct AlignedAllocator {
-    using value_type = T;
+        using value_type = T;
 
-    using pointer = T*;
-    using const_pointer = const T*;
-    using reference = T&;
-    using const_reference = const T&;
+        using pointer = T*;
+        using const_pointer = const T*;
+        using reference = T&;
+        using const_reference = const T&;
 
-    AlignedAllocator() noexcept = default;
+        AlignedAllocator() noexcept = default;
 
-    template <typename U>
-    explicit AlignedAllocator(const AlignedAllocator<U, Alignment>&) noexcept {}
+        template <typename U>
+        explicit AlignedAllocator(const AlignedAllocator<U, Alignment>&) noexcept {}
 
-    T* allocate(const std::size_t n) {
-        if (n == 0) return nullptr;
-        const std::size_t size = (n * sizeof(T) + Alignment - 1) & ~(Alignment - 1);
+        T* allocate(const std::size_t n) {
+            if (n == 0) return nullptr;
+            const std::size_t size = (n * sizeof(T) + Alignment - 1) & ~(Alignment - 1);
 
-        void* ptr = std::aligned_alloc(Alignment, size);
+            void* ptr = std::aligned_alloc(Alignment, size);
 
-        if (!ptr) throw std::bad_alloc();
-        return static_cast<T*>(ptr);
-    }
+            if (!ptr) throw std::bad_alloc();
+            return static_cast<T*>(ptr);
+        }
 
-    void deallocate(T* p, std::size_t) noexcept {
-        std::free(p);
-    }
+        void deallocate(T* p, std::size_t) noexcept {
+            std::free(p);
+        }
 
-    template <typename U>
-    struct rebind {
-        using other = AlignedAllocator<U, Alignment>;
+        template <typename U> struct rebind { using other = AlignedAllocator<U, Alignment>; };
     };
-};
 
-using AlignedVector = std::vector<float, AlignedAllocator<float, 64>>;
+    using AlignedVector = std::vector<float, AlignedAllocator<float, 64>>;
+
+    struct AlignedFree {
+        void operator()(void* p) const { std::free(p); }
+    };
+
+    template <typename T>
+    using AlignedUniquePtr = std::unique_ptr<T[], AlignedFree>;
+
+    template <typename T>
+    AlignedUniquePtr<T> make_aligned_array(const size_t count, const size_t alignment = 64) {
+        const size_t size = count * sizeof(T);
+
+        const size_t padded_size = (size + alignment - 1) & ~(alignment - 1);
+
+        void* ptr = std::aligned_alloc(alignment, padded_size);
+        if (!ptr) throw std::bad_alloc();
+
+        return AlignedUniquePtr<T>(static_cast<T*>(ptr));
+    }
 
 #endif
