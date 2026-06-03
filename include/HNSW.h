@@ -34,6 +34,16 @@ class HNSW {
     std::unique_ptr<NodeMetadata[]> nodeMetadataPtr;
     std::mdspan<float, std::extents<size_t, std::dynamic_extent, EMB_DIM>> embeddingsView;
 
+    uint16_t actualSetVersion = 0;
+    std::vector<uint16_t> versionedSetArray;
+
+    struct BufferElement {
+        uint32_t id;
+        float dist;
+        bool expanded;
+    };
+
+
     /**
      * Shrinks the neighbors of a given node at a specific layer to a maximum number of neighbors.
      * @param neighbor_id
@@ -42,7 +52,7 @@ class HNSW {
      */
     void shrinkNeighbors(uint32_t neighbor_id, uint8_t layer, uint16_t maxNeighbors);
     [[nodiscard]] uint8_t getRandomLevel() const;
-    [[nodiscard]] uint16_t searchLayer(const float* query_emb, uint32_t entry_point, uint16_t ef, uint8_t level, uint32_t* founded_neighbors) const;
+    [[nodiscard]] uint16_t searchLayer(const float* query_emb, uint32_t entry_point, uint16_t ef, uint8_t level, uint32_t* founded_neighbors);
 
 public:
     /**
@@ -56,8 +66,9 @@ public:
      * @return cosine distance between embedding1 and embedding2.
      */
     static float calculateDistanceAVX512(const float* vec1, const float* vec2);
+    static float calculateDistanceAVX512(const float* vec1, const float* vec2, const float* next_vec2);
     static float calculateDistance(const std::vector<float>& vec1, const std::vector<float>& vec2);
-    [[nodiscard]] std::vector<uint64_t> search(float* query_emb, uint16_t ef, uint16_t k) const;
+    [[nodiscard]] std::vector<uint64_t> search(float* query_emb, uint16_t ef, uint16_t k);
     void addPoint(uint64_t externalID, const float* embedding, uint16_t ef=10);
     static void normalizeVectorAVX512(float* vec);
     static void normalizeVector(std::vector<float>& vec);

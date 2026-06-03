@@ -10,11 +10,14 @@
 #include <unordered_set>
 #include <immintrin.h>
 #include <span>
+#include <array>
+#include <iostream>
 
 HNSW::HNSW(const uint8_t M) :
 embeddingsPtr(make_aligned_array<float>(HNSW_SIZE * EMB_DIM)),
 nodeMetadataPtr(std::make_unique<NodeMetadata[]>(HNSW_SIZE)),
-embeddingsView(embeddingsPtr.get(), HNSW_SIZE)
+embeddingsView(embeddingsPtr.get(), HNSW_SIZE),
+versionedSetArray(HNSW_SIZE, 0)
 {
     ml = 1.0 / std::log(static_cast<double>(M));
 }
@@ -99,19 +102,6 @@ void HNSW::normalizeVectorAVX512(float* vec) {
     }
 }
 
-static void normalizeVector(std::vector<float>& vec) {
-    float sum_sq = 0.0f;
-    for (const auto& val : vec) {
-        sum_sq += val * val;
-    }
-    if (sum_sq < 1e-12f) return;
-
-    const float inv_norm = 1.0f / std::sqrt(sum_sq);
-    for (auto& val : vec) {
-        val *= inv_norm;
-    }
-}
-
 void HNSW::addPoint(const uint64_t externalID, const float* embedding, const uint16_t ef) {
     const uint32_t newNodeID = embeddingsSize++;
     const uint8_t level = getRandomLevel();
@@ -180,60 +170,76 @@ float HNSW::calculateDistanceAVX512(const float* vec1, const float* vec2) {
     return dist < 0 ? 0 : dist;
 }
 
-float calculateDistance(std::vector<float>& vec1, std::vector<float>& vec2) {
-    float dist = 0.0f;
-    for (size_t i = 0; i < vec1.size(); ++i) {
-        dist += vec1[i] * vec2[i];
-    }
-    dist = 1.1f - dist;
-    return dist;
-}
+uint16_t HNSW::searchLayer(const float* query_emb, uint32_t entry_point, const uint16_t ef, const uint8_t level, uint32_t* founded_neighbors) {
 
-uint16_t HNSW::searchLayer(const float* query_emb, uint32_t entry_point, const uint16_t ef, const uint8_t level, uint32_t* founded_neighbors) const {
-
-    std::priority_queue<std::pair<float, uint32_t>, std::vector<std::pair<float, uint32_t>>, std::greater<>> candidates;
-    std::priority_queue<std::pair<float, uint32_t>> found_neighbors;
-    std::unordered_set<uint32_t> visited;
+    std::array<BufferElement, 201> buffer{};
+    uint16_t buffer_size = 0;
 
     const float dist = calculateDistanceAVX512(query_emb, &embeddingsView[entry_point, 0]);
 
-    candidates.emplace(dist, entry_point);
-    found_neighbors.emplace(dist, entry_point);
-    visited.insert(entry_point);
+    buffer[buffer_size++] = {entry_point, dist, false};
+    versionedSetArray[entry_point] = actualSetVersion;
 
-    while (!candidates.empty()) {
-        const auto curr = candidates.top();
-        candidates.pop();
+    uint32_t curr_idx = 0;
+    while (curr_idx < buffer_size) {
 
-        if (curr.first > found_neighbors.top().first) break;
+        if (curr_idx + 1 < buffer_size) {
+            uint32_t nextNodeID = buffer[curr_idx + 1].id;
+            _mm_prefetch(&nodeMetadataPtr[nextNodeID], _MM_HINT_T0);
+        }
 
-        for (uint8_t i=0; i < nodeMetadataPtr[curr.second].neighborCounts[level]; ++i) {
-            uint32_t neighborID = nodeMetadataPtr[curr.second].neighbors[level][i];
+        if (buffer_size >= ef && buffer[curr_idx].dist > buffer[buffer_size - 1].dist) break;
 
-            if (!visited.contains(neighborID)) {
-                visited.insert(neighborID);
+        if (!buffer[curr_idx].expanded) {
+            buffer[curr_idx].expanded = true;
+            const u_int32_t currNodeID = buffer[curr_idx].id;
 
-                if (float d = calculateDistanceAVX512(query_emb, &embeddingsView[neighborID, 0]); d < found_neighbors.top().first || found_neighbors.size() < ef) {
-                    candidates.emplace(d, neighborID);
-                    found_neighbors.emplace(d, neighborID);
+            const uint8_t numNeighbors = nodeMetadataPtr[currNodeID].neighborCounts[level];
+            for (uint8_t i=0; i < numNeighbors; ++i) {
 
-                    if (found_neighbors.size() > ef) {
-                        found_neighbors.pop();
+                const uint32_t neighborID = nodeMetadataPtr[currNodeID].neighbors[level][i];
+
+                if (versionedSetArray[neighborID] != actualSetVersion) {
+                    versionedSetArray[neighborID] = actualSetVersion;
+
+                    float d = calculateDistanceAVX512(query_emb, &embeddingsView[neighborID, 0]);
+
+                    if (buffer_size < ef || d < buffer[buffer_size - 1].dist) {
+                        uint16_t insert_pos = (buffer_size < ef) ? buffer_size : (ef - 1);
+                        while (insert_pos > 0 && buffer[insert_pos - 1].dist > d) {
+                            buffer[insert_pos] = buffer[insert_pos - 1];
+                            insert_pos--;
+                        }
+                        buffer[insert_pos] = {neighborID, d, false};
+
+                        if (insert_pos <= curr_idx) {
+                            curr_idx = insert_pos - 1;
+                        }
+
+                        if (buffer_size < ef) {
+                            buffer_size++;
+                        }
                     }
                 }
             }
         }
+        curr_idx++;
     }
 
-    const uint32_t n = found_neighbors.size();
-    for (int i = n - 1; i >= 0; --i) {
-        founded_neighbors[i] = found_neighbors.top().second;
-        found_neighbors.pop();
+    if (actualSetVersion == std::numeric_limits<uint16_t>::max()) {
+        std::ranges::fill(versionedSetArray, 0);
+        actualSetVersion = 0;
+    } else {
+        actualSetVersion++;
     }
-    return n;
+
+    for (uint16_t i = 0; i < buffer_size; ++i) {
+        founded_neighbors[i] = buffer[i].id;
+    }
+    return buffer_size;
 }
 
-std::vector<uint64_t> HNSW::search(float* query_emb, const uint16_t ef, const uint16_t k) const {
+std::vector<uint64_t> HNSW::search(float* query_emb, const uint16_t ef, const uint16_t k) {
     uint32_t actualEntryPoint = entryPointID;
 
     normalizeVectorAVX512(query_emb);

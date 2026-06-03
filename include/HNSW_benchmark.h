@@ -25,7 +25,7 @@ public:
 
     void loadVectorsToHNSW();
     void computeDistancesForQueryFile(const std::string &queryFile, uint16_t kNearestVectors) const;
-    [[nodiscard]] float getRecall(const std::string &groundTruthFilePath, const std::string &queryFilePath) const;
+    [[nodiscard]] float getRecall(const std::string &groundTruthFilePath, const std::string &queryFilePath);
 };
 
 

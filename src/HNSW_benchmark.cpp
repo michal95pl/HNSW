@@ -29,7 +29,7 @@ void HNSW_benchmark::loadVectorsToHNSW() {
     }
 }
 
-float HNSW_benchmark::getRecall(const std::string &groundTruthFilePath, const std::string &queryFilePath) const {
+float HNSW_benchmark::getRecall(const std::string &groundTruthFilePath, const std::string &queryFilePath) {
     GroundTruthFileHandler gtHandler(groundTruthFilePath);
     std::vector<GroundTruthDistance> gtDistances = gtHandler.getAllVectors();
 
