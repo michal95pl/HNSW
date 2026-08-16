@@ -14,9 +14,16 @@
 #include <iostream>
 
 HNSW::HNSW(const uint8_t M) :
+externalIdsPtr(std::make_unique<uint64_t[]>(HNSW_SIZE)),
+upper_neighbors_countsPtr(std::make_unique<uint8_t[]>(HNSW_SIZE * (HNSW_MAX_LEVEL-1))),
+upper_neighborsPtr(std::make_unique<uint32_t[]>((HNSW_MAX_LEVEL-1) * HNSW_SIZE * (HNSW_MAX_NEIGHBORS+40))),
+layer0_countsPtr(std::make_unique<uint8_t[]>(HNSW_SIZE)),
+layer0_neighborsPtr(std::make_unique<uint32_t[]>(HNSW_SIZE * (HNSW_MAX_NEIGHBORS+40))),
 embeddingsPtr(make_aligned_array<float>(HNSW_SIZE * EMB_DIM)),
-nodeMetadataPtr(std::make_unique<NodeMetadata[]>(HNSW_SIZE)),
-embeddingsView(embeddingsPtr.get(), HNSW_SIZE),
+layer0_neighborsView(layer0_neighborsPtr.get()),
+upper_neighbors_countsView(upper_neighbors_countsPtr.get()),
+upper_layer_neighborsView(upper_neighborsPtr.get()),
+embeddingsView(embeddingsPtr.get()),
 versionedSetArray(HNSW_SIZE, 0)
 {
     ml = 1.0 / std::log(static_cast<double>(M));
@@ -33,32 +40,6 @@ uint8_t HNSW::getRandomLevel() const {
     auto level = static_cast<uint8_t>(-std::log(r) * ml);
     if (level > HNSW_MAX_LEVEL) level = HNSW_MAX_LEVEL;
     return level;
-}
-
-void HNSW::shrinkNeighbors(const uint32_t neighbor_id, const uint8_t layer, const uint16_t maxNeighbors) {
-
-    if (nodeMetadataPtr[neighbor_id].neighborCounts[layer] <= maxNeighbors) {
-        return;
-    }
-
-    const uint8_t neighborCount = nodeMetadataPtr[neighbor_id].neighborCounts[layer];
-
-    std::pair<float, uint32_t> dist_pairs[neighborCount];
-
-    for (uint16_t i=0; i < neighborCount; ++i) {
-        const uint32_t neighborId = nodeMetadataPtr[neighbor_id].neighbors[layer][i];
-        dist_pairs[i].second = neighborId;
-        dist_pairs[i].first = calculateDistanceAVX512(&embeddingsView[neighbor_id, 0], &embeddingsView[neighborId, 0]);
-    }
-
-    auto data_view = std::span(dist_pairs, neighborCount);
-    std::ranges::nth_element(data_view, data_view.begin() + maxNeighbors, std::less{}, &std::pair<float, uint32_t>::first);
-
-    nodeMetadataPtr[neighbor_id].neighborCounts[layer] = maxNeighbors;
-
-    for (uint16_t i = 0; i < maxNeighbors; ++i) {
-        nodeMetadataPtr[neighbor_id].neighbors[layer][i] = dist_pairs[i].second;
-    }
 }
 
 __attribute__((target("avx512f,fma")))
@@ -109,13 +90,12 @@ void HNSW::addPoint(const uint64_t externalID, const float* embedding, const uin
     std::memcpy(&embeddingsView[newNodeID, 0], embedding, EMB_DIM * sizeof(float));
     normalizeVectorAVX512(&embeddingsView[newNodeID, 0]);
 
-    nodeMetadataPtr[newNodeID].externalId = externalID;
-    nodeMetadataPtr[newNodeID].layer = level;
+    externalIdsPtr[newNodeID] = externalID;
 
     // initialization
     if (embeddingsSize == 1) {
         entryPointID = 0;
-        maxLevel = level;
+        actualMaxLevel = level;
         return;
     }
 
@@ -123,29 +103,51 @@ void HNSW::addPoint(const uint64_t externalID, const float* embedding, const uin
     uint32_t foundedNeighbors[ef];
 
     // search best entry point for each layer above the new node's level
-    for (int l = maxLevel; l > level; --l) {
-        if (searchLayer(&embeddingsView[newNodeID, 0], currNodeID, 1, l, foundedNeighbors)) {
+    for (int l = actualMaxLevel; l > level; --l) {
+        if (searchLayer<false>(&embeddingsView[newNodeID, 0], currNodeID, 1, l, foundedNeighbors)) {
             currNodeID = foundedNeighbors[0];
         }
     }
 
-    for (int l = std::min(level, maxLevel); l >= 0; --l) {
-        const uint16_t num_neighbors = searchLayer(&embeddingsView[newNodeID, 0], currNodeID, ef, l, foundedNeighbors);
+    for (int l = std::min(level, actualMaxLevel); l >= 1; --l) {
+        const uint16_t num_neighbors = searchLayer<false>(&embeddingsView[newNodeID, 0], currNodeID, ef, l, foundedNeighbors);
         if (!num_neighbors) continue;
 
         for (uint16_t i = 0; i < num_neighbors; ++i) {
             const uint32_t neighborID = foundedNeighbors[i];
-            nodeMetadataPtr[newNodeID].neighbors[l][nodeMetadataPtr[newNodeID].neighborCounts[l]++] = neighborID;
-            nodeMetadataPtr[neighborID].neighbors[l][nodeMetadataPtr[neighborID].neighborCounts[l]++] = newNodeID;
-            shrinkNeighbors(neighborID, l, HNSW_MAX_NEIGHBORS);
+
+            const uint8_t countIdx = upper_neighbors_countsView[neighborID, l - 1]++;
+            upper_layer_neighborsView[neighborID, l - 1, countIdx] = newNodeID;
+
+            const uint8_t newCountIdx = upper_neighbors_countsView[newNodeID, l - 1]++;
+            upper_layer_neighborsView[newNodeID, l - 1, newCountIdx] = neighborID;
+
+            shrinkNeighbors<false>(neighborID, l, HNSW_MAX_NEIGHBORS);
         }
         currNodeID = foundedNeighbors[0];
-        shrinkNeighbors(newNodeID, l, HNSW_MAX_NEIGHBORS);
+        shrinkNeighbors<false>(newNodeID, l, HNSW_MAX_NEIGHBORS);
     }
 
-    if (level > maxLevel) {
+    const uint16_t num_neighbors = searchLayer<true>(&embeddingsView[newNodeID, 0], currNodeID, ef, 0, foundedNeighbors);
+
+    if (num_neighbors > 0) {
+        for (uint16_t i = 0; i < num_neighbors; ++i) {
+            const uint32_t neighborID = foundedNeighbors[i];
+
+            const uint8_t countIdx = layer0_countsPtr[neighborID]++;
+            layer0_neighborsView[neighborID, countIdx] = newNodeID;
+
+            const uint8_t newCountIdx = layer0_countsPtr[newNodeID]++;
+            layer0_neighborsView[newNodeID, newCountIdx] = neighborID;
+
+            shrinkNeighbors<true>(neighborID, 0, HNSW_MAX_NEIGHBORS);
+        }
+        shrinkNeighbors<true>(newNodeID, 0, HNSW_MAX_NEIGHBORS);
+    }
+
+    if (level > actualMaxLevel) {
         entryPointID = newNodeID;
-        maxLevel = level;
+        actualMaxLevel = level;
     }
 }
 
@@ -170,93 +172,24 @@ float HNSW::calculateDistanceAVX512(const float* vec1, const float* vec2) {
     return dist < 0 ? 0 : dist;
 }
 
-uint16_t HNSW::searchLayer(const float* query_emb, uint32_t entry_point, const uint16_t ef, const uint8_t level, uint32_t* founded_neighbors) {
-
-    std::array<BufferElement, 201> buffer{};
-    uint16_t buffer_size = 0;
-
-    const float dist = calculateDistanceAVX512(query_emb, &embeddingsView[entry_point, 0]);
-
-    buffer[buffer_size++] = {entry_point, dist, false};
-    versionedSetArray[entry_point] = actualSetVersion;
-
-    uint32_t curr_idx = 0;
-    while (curr_idx < buffer_size) {
-
-        if (curr_idx + 1 < buffer_size) {
-            uint32_t nextNodeID = buffer[curr_idx + 1].id;
-            _mm_prefetch(&nodeMetadataPtr[nextNodeID], _MM_HINT_T0);
-        }
-
-        if (buffer_size >= ef && buffer[curr_idx].dist > buffer[buffer_size - 1].dist) break;
-
-        if (!buffer[curr_idx].expanded) {
-            buffer[curr_idx].expanded = true;
-            const u_int32_t currNodeID = buffer[curr_idx].id;
-
-            const uint8_t numNeighbors = nodeMetadataPtr[currNodeID].neighborCounts[level];
-            for (uint8_t i=0; i < numNeighbors; ++i) {
-
-                const uint32_t neighborID = nodeMetadataPtr[currNodeID].neighbors[level][i];
-
-                if (versionedSetArray[neighborID] != actualSetVersion) {
-                    versionedSetArray[neighborID] = actualSetVersion;
-
-                    float d = calculateDistanceAVX512(query_emb, &embeddingsView[neighborID, 0]);
-
-                    if (buffer_size < ef || d < buffer[buffer_size - 1].dist) {
-                        uint16_t insert_pos = (buffer_size < ef) ? buffer_size : (ef - 1);
-                        while (insert_pos > 0 && buffer[insert_pos - 1].dist > d) {
-                            buffer[insert_pos] = buffer[insert_pos - 1];
-                            insert_pos--;
-                        }
-                        buffer[insert_pos] = {neighborID, d, false};
-
-                        if (insert_pos <= curr_idx) {
-                            curr_idx = insert_pos - 1;
-                        }
-
-                        if (buffer_size < ef) {
-                            buffer_size++;
-                        }
-                    }
-                }
-            }
-        }
-        curr_idx++;
-    }
-
-    if (actualSetVersion == std::numeric_limits<uint16_t>::max()) {
-        std::ranges::fill(versionedSetArray, 0);
-        actualSetVersion = 0;
-    } else {
-        actualSetVersion++;
-    }
-
-    for (uint16_t i = 0; i < buffer_size; ++i) {
-        founded_neighbors[i] = buffer[i].id;
-    }
-    return buffer_size;
-}
-
 std::vector<uint64_t> HNSW::search(float* query_emb, const uint16_t ef, const uint16_t k) {
     uint32_t actualEntryPoint = entryPointID;
 
     normalizeVectorAVX512(query_emb);
 
     uint32_t founded_neighbors[ef];
-    for (int i = maxLevel; i >= 1; --i) {
-        if (!searchLayer(query_emb, actualEntryPoint, 1, i, founded_neighbors)) {
+    for (int i = actualMaxLevel; i >= 1; --i) {
+        if (searchLayer<false>(query_emb, actualEntryPoint, 1, i, founded_neighbors)) {
             actualEntryPoint = founded_neighbors[0];
         }
     }
 
-    const uint16_t numNeighbours = searchLayer(query_emb, actualEntryPoint, ef, 0, founded_neighbors);
+    const uint16_t numNeighbours = searchLayer<true>(query_emb, actualEntryPoint, ef, 0, founded_neighbors);
     std::vector<uint64_t> result;
     const uint16_t actualK = std::min(k, numNeighbours);
     result.reserve(actualK);
     for (uint16_t i = 0; i < actualK; i++) {
-        result.push_back(nodeMetadataPtr[founded_neighbors[i]].externalId);
+        result.push_back(externalIdsPtr[founded_neighbors[i]]);
     }
     return result;
 }
