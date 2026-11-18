@@ -2,7 +2,7 @@
 // Created by michal on 13.04.2026.
 //
 
-#include <progress_bar.h>
+#include <../include/hnsw/progress_bar.h>
 #include <iostream>
 #include <iomanip>
 #include <chrono>
@@ -10,7 +10,7 @@
 ProgressBar::ProgressBar(const std::size_t total, const uint16_t barWidth, const std::string &description)
 : total(total), barWidth(barWidth), startTime(std::chrono::steady_clock::now()), description(description) {}
 
-void ProgressBar::update(std::size_t current) const {
+void ProgressBar::update(const std::size_t current) const {
     if (total == 0) return;
 
     float progress = static_cast<float>(current) / total;

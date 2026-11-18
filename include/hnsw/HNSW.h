@@ -7,12 +7,11 @@
 
 #include <vector>
 #include <cstdint>
-#include <aligned_utils.h>
 #include <memory>
 #include <mdspan>
 #include <immintrin.h>
 #include <complex>
-#include <utils.h>
+#include <hnsw/aligned_utils.h>
 
 class HNSW {
     uint32_t entryPointID = 0;
@@ -21,8 +20,8 @@ class HNSW {
     static constexpr uint8_t HNSW_MAX_LEVEL = 6;
     static constexpr uint8_t MAX_EF = 200;
 
-    static constexpr uint16_t EMB_DIM = 768;
-    static constexpr uint32_t HNSW_SIZE = 100000;
+    static constexpr uint16_t EMB_DIM = 256;
+    static constexpr uint32_t HNSW_SIZE = 500000;
     static constexpr uint8_t M = 16;
     const float ml = 1.0 / std::log(M);
 

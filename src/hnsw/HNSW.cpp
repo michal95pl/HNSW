@@ -4,7 +4,7 @@
 
 #include <algorithm>
 #include <cstring>
-#include <HNSW.h>
+#include "hnsw/HNSW.h"
 #include <random>
 #include <queue>
 #include <unordered_set>
@@ -12,6 +12,7 @@
 #include <span>
 #include <array>
 #include <iostream>
+#include "hnsw/utils.h"
 
 HNSW::HNSW() :
     externalIdsPtr(std::make_unique<uint64_t[]>(HNSW_SIZE)),
@@ -222,10 +223,11 @@ uint16_t HNSW::select_neighbors_heuristic(const uint32_t baseNodeID, const std::
     std::array<BufferElement, M*2> discarded_buffer{};
     uint16_t discarded_buffer_size = 0;
 
+    // sorted by distance
     for (const uint32_t candidateID : candidates) {
         const float dist = calculateDistanceAVX512(&embeddingsView[baseNodeID, 0], &embeddingsView[candidateID, 0]);
         insertIntoBuffer<BufferElement>(
-            BufferElement{candidateID, dist},
+            BufferElement{.id = candidateID, .dist = dist},
             candidates_buffer,
             candidates_buffer_size,
             MAX_EF
@@ -249,13 +251,13 @@ uint16_t HNSW::select_neighbors_heuristic(const uint32_t baseNodeID, const std::
 
         if (is_closer_than_any) {
             foundedNeighbors[result_size++] = candidate.id;
-        } else {
+        } else if (keepPrunedConnections && discarded_buffer_size < m) {
             discarded_buffer[discarded_buffer_size++] = candidate;
         }
     }
 
     if (keepPrunedConnections && result_size < m) {
-        for (uint16_t i = 0; i < discarded_buffer_size && result_size < M; ++i) {
+        for (uint16_t i = 0; i < discarded_buffer_size && result_size < m; ++i) {
             foundedNeighbors[result_size++] = discarded_buffer[i].id;
         }
     }
@@ -285,6 +287,7 @@ uint16_t HNSW::searchLayer(const float* query_emb, const uint32_t entry_point, c
         }
         if (curr_idx == -1) break;
 
+        // TODO: Early Termination with gap threshold set to 0.02
         if (buffer_size >= ef && buffer[curr_idx].dist > buffer[buffer_size - 1].dist) {
             break;
         }
@@ -296,9 +299,9 @@ uint16_t HNSW::searchLayer(const float* query_emb, const uint32_t entry_point, c
             if (!buffer[next].expanded) {
                 const uint32_t nextID = buffer[next].id;
                 if constexpr (IsLayer0) {
-                    _mm_prefetch(&layer0_countsPtr[nextID], _MM_HINT_T0);
+                    _mm_prefetch((&layer0_countsPtr[nextID]), _MM_HINT_T0);
                 } else {
-                    _mm_prefetch(&upper_neighbors_countsView[nextID, level - 1], _MM_HINT_T0);
+                    _mm_prefetch((&upper_neighbors_countsView[nextID, level - 1]), _MM_HINT_T0);
                 }
                 break;
             }
@@ -318,9 +321,9 @@ uint16_t HNSW::searchLayer(const float* query_emb, const uint32_t entry_point, c
         for (uint8_t i = 0; i < numNeighbors; ++i) {
             if (i + 1 < numNeighbors) {
                 const uint32_t nextID = current_neighbors[i + 1];
-                _mm_prefetch(&embeddingsView[nextID, 0], _MM_HINT_T0);
-                _mm_prefetch(&embeddingsView[nextID, 16], _MM_HINT_T0);
-                _mm_prefetch(&versionedSetArray[nextID], _MM_HINT_T0);
+                _mm_prefetch((&embeddingsView[nextID, 0]), _MM_HINT_T0);
+                _mm_prefetch((&embeddingsView[nextID, 16]), _MM_HINT_T0);
+                _mm_prefetch((&versionedSetArray[nextID]), _MM_HINT_T0);
             }
 
             const uint32_t neighborID = current_neighbors[i];

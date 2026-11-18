@@ -10,6 +10,11 @@ perf.data
 perf.data.old
 HNSW/
 data/
+skills/
+.directory
+src/
+
+.directory
 
 *.o
 *.a
