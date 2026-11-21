@@ -60,7 +60,7 @@ class HNSW {
 
     [[nodiscard]] uint8_t getRandomLevel() const;
 
-    template<bool IsLayer0>
+    template<bool IsLayer0, bool isBuild>
     uint16_t searchLayer(const float* query_emb, uint32_t entry_point, uint16_t ef, uint8_t level, uint32_t* founded_neighbors);
 
 

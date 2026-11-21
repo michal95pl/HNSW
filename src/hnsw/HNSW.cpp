@@ -99,7 +99,7 @@ void HNSW::addPoint(const uint64_t externalID, const float* embedding, const uin
     uint32_t search_results[MAX_EF];
 
     for (int l = actualMaxLevel; l > level; --l) {
-        if (searchLayer<false>(&embeddingsView[newNodeID, 0], currNodeID, 1, l, search_results)) {
+        if (searchLayer<false, false>(&embeddingsView[newNodeID, 0], currNodeID, 1, l, search_results)) {
             currNodeID = search_results[0];
         }
     }
@@ -110,9 +110,9 @@ void HNSW::addPoint(const uint64_t externalID, const float* embedding, const uin
 
         uint16_t num_candidates = 0;
         if (isLayer0) {
-            num_candidates = searchLayer<true>(&embeddingsView[newNodeID, 0], currNodeID, ef, 0, search_results);
+            num_candidates = searchLayer<true, false>(&embeddingsView[newNodeID, 0], currNodeID, ef, 0, search_results);
         } else {
-            num_candidates = searchLayer<false>(&embeddingsView[newNodeID, 0], currNodeID, ef, l, search_results);
+            num_candidates = searchLayer<false, false>(&embeddingsView[newNodeID, 0], currNodeID, ef, l, search_results);
         }
         if (num_candidates == 0) continue;
 
@@ -201,12 +201,12 @@ std::vector<uint64_t> HNSW::search(float* query_emb, const uint16_t ef, const ui
 
     uint32_t founded_neighbors[MAX_EF];
     for (int i = actualMaxLevel; i >= 1; --i) {
-        if (searchLayer<false>(query_emb, actualEntryPoint, 1, i, founded_neighbors)) {
+        if (searchLayer<false, false>(query_emb, actualEntryPoint, 1, i, founded_neighbors)) {
             actualEntryPoint = founded_neighbors[0];
         }
     }
 
-    const uint16_t numNeighbours = searchLayer<true>(query_emb, actualEntryPoint, ef, 0, founded_neighbors);
+    const uint16_t numNeighbours = searchLayer<true, false>(query_emb, actualEntryPoint, ef, 0, founded_neighbors);
     std::vector<uint64_t> result;
     const uint16_t actualK = std::min(k, numNeighbours);
     result.reserve(actualK);
@@ -264,7 +264,7 @@ uint16_t HNSW::select_neighbors_heuristic(const uint32_t baseNodeID, const std::
     return result_size;
 }
 
-template<bool IsLayer0>
+template<bool IsLayer0, bool isBuild>
 uint16_t HNSW::searchLayer(const float* query_emb, const uint32_t entry_point, const uint16_t ef, const uint8_t level, uint32_t* founded_neighbors) {
 
     // buffer on stack, is sorted. Last element is the farthest.
@@ -276,6 +276,10 @@ uint16_t HNSW::searchLayer(const float* query_emb, const uint32_t entry_point, c
     buffer[buffer_size++] = {entry_point, dist, false};
     versionedSetArray[entry_point] = actualSetVersion;
 
+    // for KBeans
+    uint16_t consecutive_failures = 0;
+    const uint16_t patience_max = ef;
+    const uint16_t t_threshold = ef * 0.5f;
 
     while (true) {
         int32_t curr_idx = -1;
@@ -286,11 +290,6 @@ uint16_t HNSW::searchLayer(const float* query_emb, const uint32_t entry_point, c
             }
         }
         if (curr_idx == -1) break;
-
-        // TODO: Early Termination with gap threshold set to 0.02
-        if (buffer_size >= ef && buffer[curr_idx].dist > buffer[buffer_size - 1].dist) {
-            break;
-        }
 
         buffer[curr_idx].expanded = true;
         const uint32_t currNodeID = buffer[curr_idx].id;
@@ -333,14 +332,26 @@ uint16_t HNSW::searchLayer(const float* query_emb, const uint32_t entry_point, c
 
             const float d = calculateDistanceAVX512(query_emb, &embeddingsView[neighborID, 0]);
 
-            insertIntoBuffer<SearchBufferElement>(
+            const uint16_t insert_position = insertIntoBuffer<SearchBufferElement>(
                 SearchBufferElement{neighborID, d, false},
                 buffer,
                 buffer_size,
                 ef
             );
+            // KBeas (2508)
+            if constexpr (IsLayer0 && isBuild) {
+                if (insert_position > t_threshold) {
+                    if (++consecutive_failures >= patience_max) {
+                        goto out;
+                    }
+                } else {
+                    consecutive_failures = 0;
+                }
+            }
         }
     }
+
+    out:
 
     if (actualSetVersion == std::numeric_limits<uint16_t>::max()) {
         std::ranges::fill(versionedSetArray, 0);
@@ -352,11 +363,18 @@ uint16_t HNSW::searchLayer(const float* query_emb, const uint32_t entry_point, c
     for (uint16_t i = 0; i < buffer_size; ++i) {
         founded_neighbors[i] = buffer[i].id;
     }
+
     return buffer_size;
 }
 
-template uint16_t HNSW::searchLayer<true>(
+template uint16_t HNSW::searchLayer<true, false>(
     const float*, uint32_t, uint16_t, uint8_t, uint32_t*);
 
-template uint16_t HNSW::searchLayer<false>(
+template uint16_t HNSW::searchLayer<false, false>(
+    const float*, uint32_t, uint16_t, uint8_t, uint32_t*);
+
+template uint16_t HNSW::searchLayer<false, true>(
+    const float*, uint32_t, uint16_t, uint8_t, uint32_t*);
+
+template uint16_t HNSW::searchLayer<true, true>(
     const float*, uint32_t, uint16_t, uint8_t, uint32_t*);

@@ -15,15 +15,17 @@ void loadVectorsToHNSW(HNSW &hnsw, const std::string &file) {
     std::vector<AlignedVector> batch(batchSize);
     VectorDatasetLoader dataLoader(file);
 
-    const ProgressBar progressBar(dataLoader.getNumRows(), 50, "Add vectors to hnsw");
+    ProgressBar progressBar(dataLoader.getNumRows(), 50, "Add vectors to hnsw");
     uint64_t vecNum = 0;
 
     while (dataLoader.getNextVectors(batchSize, batch)) {
+        progressBar.start_timer();
         for (auto &vec : batch) {
             const uint64_t external_id = vecNum;
             hnsw.addPoint(external_id, vec.data(), 200);
             vecNum++;
         }
+        progressBar.stop_timer();
         progressBar.update(vecNum);
     }
 }
@@ -49,10 +51,15 @@ float getRecall(HNSW &hnsw, const std::string &groundTruthFilePath, const std::s
     const uint32_t efSearch = std::max<uint32_t>(64, k);
     const size_t limit = std::min(static_cast<size_t>(k), static_cast<size_t>(gtDataset.getK()));
 
+    ProgressBar progressBar(gtDistances.size(), 50, "Computing top@k");
+    uint64_t vecNum = 0;
+
     for (auto &[queryId, neighborIds] : gtDistances) {
         AlignedVector& actualQuery = query_vectors[queryId];
 
+        progressBar.start_timer();
         auto results = hnsw.search(actualQuery.data(), efSearch, limit);
+        progressBar.stop_timer();
 
         auto gtBegin = neighborIds.begin();
         auto gtEnd = gtBegin + limit;
@@ -62,6 +69,9 @@ float getRecall(HNSW &hnsw, const std::string &groundTruthFilePath, const std::s
                 totalHits++;
             }
         }
+
+        vecNum++;
+        progressBar.update(vecNum);
     }
 
     return static_cast<float>(totalHits) / static_cast<float>(gtDistances.size() * limit);

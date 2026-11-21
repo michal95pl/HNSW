@@ -8,7 +8,7 @@
 #include <chrono>
 
 ProgressBar::ProgressBar(const std::size_t total, const uint16_t barWidth, const std::string &description)
-: total(total), barWidth(barWidth), startTime(std::chrono::steady_clock::now()), description(description) {}
+: total(total), barWidth(barWidth),description(description), etaStartTime(std::chrono::steady_clock::now()) {}
 
 void ProgressBar::update(const std::size_t current) const {
     if (total == 0) return;
@@ -19,7 +19,7 @@ void ProgressBar::update(const std::size_t current) const {
     const uint16_t pos = static_cast<uint16_t>(barWidth * progress);
 
     const auto now = std::chrono::steady_clock::now();
-    const auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - startTime).count();
+    const auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - etaStartTime).count();
 
     uint32_t eta = 0;
     if (current > 0) {
@@ -40,12 +40,25 @@ void ProgressBar::update(const std::size_t current) const {
               << std::setfill('0') << std::setw(2) << secs << " [" << description << "]  " << std::flush;
 }
 
+void ProgressBar::start_timer() {
+    if (!timerPaused) return;
+    timerStartTime = std::chrono::steady_clock::now();
+    timerPaused = false;
+}
+void ProgressBar::stop_timer() {
+    if (timerPaused) return;
+    timerPaused = true;
+    accumulatedTime += (std::chrono::steady_clock::now() - timerStartTime);
+    timerStartTime = std::chrono::steady_clock::time_point{};
+}
+
 void ProgressBar::finish() {
     if (finished) return;
 
     std::cout << std::endl;
 
-    const auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - startTime).count();
+    stop_timer();
+    const auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(accumulatedTime).count();
     std::cout << "Total time: " << elapsed / 60 << " mins " << elapsed % 60 << " secs" << std::endl;
 
     std::cout << std::defaultfloat << std::setprecision(6);
